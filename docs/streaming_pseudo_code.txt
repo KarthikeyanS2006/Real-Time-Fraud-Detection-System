@@ -1,0 +1,62 @@
+# docs/streaming_pseudo_code.txt
+"""
+Conceptual Pseudo-Code for Real-Time Data Ingestion and Stream Processing (using Kafka/Flink concept)
+This illustrates FR1 and FR2 from the report.
+"""
+
+# --- 1. Transaction Producer (Payment Gateway Side) ---
+def produce_transaction(raw_data):
+    """
+    Simulates sending raw transaction data to the input stream.
+    """
+    KAFKA_PRODUCER.send(
+        topic='raw_transactions_in', 
+        key=raw_data['user_id'].encode(),
+        value=json.dumps(raw_data).encode()
+    )
+    LOG.info(f"Transaction sent to stream: {raw_data['tx_id']}")
+
+# --- 2. Stream Processor (Flink/Spark Streaming) ---
+def start_stream_processing():
+    """
+    The main logic of the real-time stream consumer and feature calculation.
+    """
+    
+    stream = KAFKA_CONSUMER.subscribe(topic='raw_transactions_in')
+
+    # Map function to calculate features and query Redis
+    def process_transaction(transaction_record):
+        tx = json.loads(transaction_record)
+        
+        # A. Core Features
+        user_id = tx['user_id']
+        tx_amount = tx['amount']
+
+        # B. Feature Store Lookup (e.g., Velocity Check)
+        # This is the lowest-latency step, querying Redis/Feature Store
+        velocity_count = REDIS_CLIENT.get(f'velocity:1h:{user_id}') or 0
+        avg_amount_hist = REDIS_CLIENT.get(f'avg_amt:{user_id}') or tx_amount
+        
+        # C. Feature Engineering (Calculation)
+        distance_from_last = calculate_distance(tx['location'], tx['last_location'])
+        
+        # Assemble the input vector for the ML model
+        ml_input_vector = {
+            'amount': tx_amount,
+            'distance_from_last_tx': distance_from_last,
+            'count_tx_1h': velocity_count + 1 # Include the current transaction
+        }
+
+        # D. Call the Deployed ML Service
+        fraud_score = CALL_API_SERVICE('http://fraud_scorer_api/predict', ml_input_vector)
+
+        # E. Update Feature Store
+        REDIS_CLIENT.increment(f'velocity:1h:{user_id}', 1)
+        REDIS_CLIENT.set_expiry(f'velocity:1h:{user_id}', 3600) # Expire after 1 hour
+
+        return fraud_score, tx['tx_id']
+
+    # Apply the process function to the stream
+    DECISION_STREAM = stream.map(process_transaction).sink_to_decision_engine()
+    
+    EXECUTE_STREAMING_JOB()
